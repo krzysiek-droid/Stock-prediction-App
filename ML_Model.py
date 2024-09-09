@@ -1,8 +1,8 @@
-import matplotlib.pyplot as plt
 import pandas as pd
 
 from ml_funcs import *
 import market_indicators as mi
+from data_acquisition import StockObj
 
 
 def prepare_dataframe(analyzed_stock_name):
@@ -12,9 +12,9 @@ def prepare_dataframe(analyzed_stock_name):
 
         # Get ohlcv data with indicators
         indicators_data = pd.read_csv(fr'{mi.INDICATORS_FOLDER_PATH}\{analyzed_stock_name}_indicators.csv', sep=';')
-        indicators_data['Date'] = pd.to_datetime(indicators_data['Date'], format='%Y-%m-%d', exact=False)
-        indicators_data['Date'] = indicators_data['Date'].dt.date
-        indicators_data.set_index('Date', inplace=True)
+        indicators_data['date'] = pd.to_datetime(indicators_data['date'], format='%Y-%m-%d', exact=False)
+        indicators_data['date'] = indicators_data['date'].dt.date
+        indicators_data.set_index('date', inplace=True)
         # indicators_data.dropna(axis='index', how='any', inplace=True)
 
     except Exception as exc:
@@ -26,91 +26,94 @@ def prepare_dataframe(analyzed_stock_name):
     return indicators_data
 
 
+class StockPredictionAlgo:
+    def __init__(self, stock_ticker: str):
+        super(StockPredictionAlgo, self).__init__()
+        self.stock_name = stock_ticker
+        self.stock_object = None
+
+    def check_ticker(self):
+        tmp_stock = StockObj()
+
 def main():
     stock_name = 'WIG20.PL'
     stock_hd = prepare_dataframe(stock_name)[::-1]
 
+    filtered_stock_data = stock_hd[['close', 'open', 'high', 'low', 'prediction', 'signal',
+                                    'RSI', 'ADX', 'CCI']]
+
+    filtered_stock_data = filtered_stock_data.dropna(inplace=False)
+
+    # Settings
     data_split_ratio = (0.7, 0.2, 0.1)  # (train, validation, test)
-    n_lookback = 14
-    n_lookfor = 5
+    n_lookback = 5
+    n_lookfor = 3
+    prediction_target = 'close'
+    predictors = ['open', 'high', 'low', 'close', 'prediction', 'RSI', 'ADX', 'CCI']
 
-    filtered_stock_data = stock_hd[['close', 'open', 'prediction', 'bb_upper', 'bb_middle',
-                                    'bb_lower', 'macd', 'macdSignal', 'macd_hist']]
+    # split and standardize dataset (ohlcv)
+    train_df_std, val_df_std, test_df_std, train_scalar = split_and_standardize(filtered_stock_data, prediction_target,
+                                                                                predictors, data_split_ratio)
 
-    filtered_stock_data.dropna(inplace=True)
-    print(filtered_stock_data)
-    stock_prices = filtered_stock_data[['close']]
-    features_df = filtered_stock_data[['open', 'prediction', 'bb_upper', 'bb_middle',
-                                       'bb_lower', 'macd', 'macdSignal', 'macd_hist']]
+    # preprocess data for training - split the dataset for the arrays of [(predictors values), predicted value]
+    X_train, y_train, train_dates, X_val, y_val, val_dates, X_test, y_test, test_dates = \
+        preprocess_for_training(train_df_std, val_df_std, test_df_std, n_lookback, n_lookfor)
 
-    # Split the data for the training, validation and test groups
-    train_df, val_df, test_df = split_data(features_df, stock_prices, data_split_ratio)
+    # Generate the dates for which prediction will be made
+    dates_to_be_predicted = generate_future_working_days(test_dates, n_lookfor)
 
-    train_df_std, train_scalar = standardize_features(train_df)
-    val_df_std, _ = standardize_features(val_df, train_scalar)
-    test_df_std, _ = standardize_features(test_df, train_scalar)
+    # --------------------------------- GENERATE THE ML MODEL ---------------------------------------------------------
+    ml_model, history, predictions = train_and_test(X_train, y_train, X_test, n_lookfor, (X_val, y_val))
 
-    dataset_columns = train_df.columns
+    # --------------------------------- PREDICT THE FUTURE! ------------------------------------------------------------
+    # Get the dataframe of predictors from a testing set, and remove column with predicted values
+    predictors_df = test_df_std.drop(columns=train_df_std.columns[-1])
+    # Get the predictor values on which the prediction of future will be performed (looking n_lookback to the past)
+    predictors_of_future = predictors_df.tail(n_lookback).to_numpy()
+    # Reshape the predictors to be a single point from which a prediction is being made by a model
+    predictors_of_future = predictors_of_future.reshape(1, n_lookback, len(predictors_df.columns))
 
-    standardization_parameters_df = pd.DataFrame([train_scalar.mean_, train_scalar.var_],
-                                                 columns=train_df_std.columns,
-                                                 index=["Mean", "Variance"])
-
-    X_train, y_train, train_dates = preprocess_data(train_df_std.drop(columns=dataset_columns[-1]).to_numpy(),
-                                                    train_df_std[dataset_columns[-1]].to_numpy(),
-                                                    train_df_std.index.values, n_lookback, n_lookfor)
-    X_val, y_val, val_dates = preprocess_data(val_df_std.drop(columns=dataset_columns[-1]).to_numpy(),
-                                              val_df_std[dataset_columns[-1]].to_numpy(),
-                                              val_df_std.index.values, n_lookback, n_lookfor)
-    X_test, y_test, test_dates = preprocess_data(test_df_std.drop(columns=dataset_columns[-1]).to_numpy(),
-                                                 test_df_std[dataset_columns[-1]].to_numpy(),
-                                                 test_df_std.index.values, n_lookback, n_lookfor)
-
-    test_df_std = test_df_std.drop(columns=dataset_columns[-1])
-    X_for_future = test_df_std.tail(n_lookback).to_numpy()
-    predicted_dates = generate_future_working_days(test_df_std.index.values[-1], n_lookfor)
-    X_for_future = X_for_future.reshape(1, n_lookback, len(test_df_std.columns))
-
-    ml_model, history = run_LSTM(X_train, y_train, n_lookfor, (X_val, y_val), nodes=len(dataset_columns) * 10,
-                                 MAX_EPOCHS=50)
-
-    predictions = ml_model.predict(X_test)
-    predictions = reverse_preprocess(predictions)
-
-    ml_model.reset_states()
-
-    future_prediction = ml_model.predict(X_for_future)
+    future_prediction = ml_model.predict(predictors_of_future)
+    # ------------------------------------------------------------------------------------------------------------------
 
     prediction_result = {
         'std_predicted': predictions,
         'predicted_close': rescale_data(predictions, -1, train_scalar),
         'y_test': reverse_preprocess(y_test),
         'y_test_real': rescale_data(reverse_preprocess(y_test), -1, train_scalar),
-        'Date': reverse_preprocess(test_dates)
+        'date': reverse_preprocess(test_dates)
     }
 
     future_predictions = {
         'std_predicted': future_prediction.flatten(),
         'predicted_close': rescale_data(future_prediction.flatten(), -1, train_scalar),
-        'Date': predicted_dates
+        'date': dates_to_be_predicted
     }
-
 
     forecast_graph = {
-        'Date': np.insert(predicted_dates, 0, prediction_result['Date'][-1]),
+        'date': np.insert(dates_to_be_predicted, 0, prediction_result['date'][-1]),
         'price': np.insert(future_predictions['predicted_close'], 0, prediction_result['predicted_close'][-1])
     }
-    forecast_graph['daily_return'] = calculate_daily_return(forecast_graph['price'])
-    forecast_df = pd.DataFrame(forecast_graph)
-    forecast_df.set_index('Date')
-    print(f"-------------------- Forecast result ------------------------ \n{forecast_df}")
 
+    # Calculate daily returns
+    forecast_graph['daily_return'] = calculate_daily_return(forecast_graph['price'])
+
+    # Recalculate daily returns to be in percentage
+    forecast_graph['daily_return'] = np.insert(
+        (forecast_graph['price'][1:] / forecast_graph['price'][:-1] - 1) * 100,
+        0,
+        0
+    )
+
+    forecast_df = pd.DataFrame(forecast_graph)
+    forecast_df.set_index('date')
+    print(f"-------------------- Forecast result ------------------------ \n{forecast_df}")
 
     fig, ax = plt.subplots()
 
-    ax.plot(prediction_result['Date'], prediction_result['predicted_close'], label='[test] predicted', color='blue')
-    ax.plot(prediction_result['Date'], prediction_result['y_test_real'], label='[test] actual', color='green')
-    ax.plot(forecast_graph['Date'], forecast_graph['price'], label=f'{n_lookfor}D forecast', color='yellow')
+    ax.plot(prediction_result['date'], prediction_result['predicted_close'], label='[test] predicted', color='blue')
+    ax.plot(prediction_result['date'], prediction_result['y_test_real'], label='[test] actual', color='green')
+    ax.plot(forecast_graph['date'], forecast_graph['price'], label=f'{n_lookfor}D forecast', color='yellow')
 
     plt.xticks(rotation='vertical')
     plt.ylabel('Price')
@@ -119,6 +122,13 @@ def main():
     plt.show()
 
     return 0
+
+
+# Function to calculate daily returns, assuming the first element is 0 for NaN
+def calculate_daily_return(prices):
+    returns = np.diff(prices) / prices[:-1] * 100
+    returns = np.insert(returns, 0, 0)
+    return returns
 
 
 main()

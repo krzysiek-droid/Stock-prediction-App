@@ -1,0 +1,26 @@
+# Ignorowanie plików tymczasowych edytorów
+*~
+*.swp
+
+# Ignorowanie plików logów
+*.log
+
+# Ignorowanie katalogu build i wszystkich jego podkatalogów
+build/
+
+# Ignorowanie plików konfiguracyjnych specyficznych dla użytkownika
+config/*.local
+
+# Ignorowanie plików binarnych
+*.csv
+*.ui
+*.txt
+*.pyc
+*.jpg
+# Ignorowanie folderu node_modules (typowe dla projektów JavaScript)
+.idea/
+__pycache__/
+
+# Ignorowanie plików specyficznych dla systemu operacyjnego
+
+# Wyjątki

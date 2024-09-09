@@ -1,3 +1,5 @@
+import datetime
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -33,6 +35,23 @@ def run_LSTM(training_features, training_target, forecast_steps, validation_data
     return ml_model, history
 
 
+def train_and_test(training_predictors_set, training_predictions_set, testing_predictors_set,
+                   n_lookfor, validation_set: tuple, nodes_multiplier=25, MAX_EPOCHS=30):
+    nodes = len(training_predictors_set[-1]) * nodes_multiplier
+
+    ml_model, history = run_LSTM(training_predictors_set, training_predictions_set, n_lookfor, validation_set, nodes,
+                                 MAX_EPOCHS)
+
+    # predict the past (use the model to predict the points in time that we can validate)
+    predicted_values = ml_model.predict(testing_predictors_set)
+    predicted_values = reverse_preprocess(predicted_values)
+
+    # reset the model states, to prepare it for prediction of future
+    ml_model.reset_states()
+
+    return ml_model, history, predicted_values
+
+
 def split_data(features_df: pd.DataFrame, y_target: pd.DataFrame, split_ratios: tuple):
     """
         split ratio: a tuple containing the fractions of dataframe length designated for training, validation and testing
@@ -64,6 +83,44 @@ def split_data(features_df: pd.DataFrame, y_target: pd.DataFrame, split_ratios: 
     return train_df, val_df, test_df
 
 
+def split_and_standardize(ohlcv_data: pd.DataFrame, prediction_target_column_name: str,
+                          predictors_column_names: list, data_split_ratio: tuple):
+    """Prepare dataset, meaning splitting with the 'data_split_ratio' and standardizing"""
+    stock_prices = ohlcv_data[[prediction_target_column_name]]
+    features_df = ohlcv_data[predictors_column_names]
+
+    # Split the data for the training, validation and test groups
+    train_df, val_df, test_df = split_data(features_df, stock_prices, data_split_ratio)
+
+    # Standardize the data
+    train_df_std, train_scalar = standardize_features(train_df)
+    val_df_std, _ = standardize_features(val_df, train_scalar)
+    test_df_std, _ = standardize_features(test_df, train_scalar)
+
+    return train_df_std, val_df_std, test_df_std, train_scalar
+
+
+def preprocess_for_training(training_set, validation_set, testing_set, n_lookback, n_lookfor):
+    """ preprocessing the ohlcv sets (training, validation and testing) for training meaning splitting each of them into
+    the sets of ((predictors values*lookback timestamps), resulting target*lookfor timestamps). OHLCV sets must be
+    standardized !
+    """
+    dataset_columns = training_set.columns
+
+    # remove the last columns form the datasets, which is reserved for predicted value
+    X_train, y_train, train_dates = preprocess_data(training_set.drop(columns=dataset_columns[-1]).to_numpy(),
+                                                    training_set[dataset_columns[-1]].to_numpy(),
+                                                    training_set.index.values, n_lookback, n_lookfor)
+    X_val, y_val, val_dates = preprocess_data(validation_set.drop(columns=dataset_columns[-1]).to_numpy(),
+                                              validation_set[dataset_columns[-1]].to_numpy(),
+                                              validation_set.index.values, n_lookback, n_lookfor)
+    X_test, y_test, test_dates = preprocess_data(testing_set.drop(columns=dataset_columns[-1]).to_numpy(),
+                                                 testing_set[dataset_columns[-1]].to_numpy(),
+                                                 testing_set.index.values, n_lookback, n_lookfor)
+
+    return X_train, y_train, train_dates, X_val, y_val, val_dates, X_test, y_test, test_dates
+
+
 def plot_features_standardized(features_df):
     df_std = features_df.melt(var_name='Column', value_name='Normalized')
     plt.figure(figsize=(12, 6))
@@ -82,8 +139,10 @@ def preprocess_data(X_data, y_data, dates_data, data_seq: int, days_to_predict=5
     return np.array(X), np.array(y), np.array(y_dates)
 
 
-def generate_future_working_days(start_date: date, days_into_future) -> np.array:
-    current_date = start_date + timedelta(days=1)
+def generate_future_working_days(testing_dates: np.array, days_into_future) -> np.array:
+    """Take the set of last days, that was used to test the latest prediction (for last trading day)"""
+    print(f"Last day tested: -> {testing_dates[-1][-1]}")
+    current_date = testing_dates[-1][-1] + timedelta(days=1)
     working_days = []
     while len(working_days) < days_into_future:
         # Skip weekends (Saturday and Sunday)
@@ -91,6 +150,7 @@ def generate_future_working_days(start_date: date, days_into_future) -> np.array
             working_days.append(current_date)
         # Move to the next day
         current_date += timedelta(days=1)
+
     return np.array(working_days)
 
 
